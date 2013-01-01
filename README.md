@@ -9,8 +9,10 @@ TEENSY3 Arduino project for LED "levitation wand"
 
 
 Electronics:
+
 	- Electret microphone & preamp.
 	- Strip of LEDs.
 	- Teensy 3.0 (http://www.pjrc.com/teensy/)
 	- Power from a single LIPO plus 5v booster.
 	- USB Battery charger (https://www.sparkfun.com/products/10401)
+
