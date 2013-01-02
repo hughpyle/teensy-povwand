@@ -1,4 +1,4 @@
-# Teensy3 sound-reactive LED Leviation Wand
+# Teensy3 sound-reactive LED Levitation Wand
 
 This is an Arduino project using Teensy 3.0 hardware (ARM Cortex M4).  
 
@@ -21,7 +21,7 @@ The incredibly small and amazingly powerful (ARM Cortex M4 at 96 MHz) [Teensy 3.
 
 - Electret microphone & preamp.  
 I used a [Transound TSB140](http://www.jlielectronics.com/transsound/electrets/tsb-140a.htm) microphone, which has an internal FET and three terminals.
-See the [schematic](schematic.png) for details of the mic preamp.
+See the [schematic](/hughpyle/teensy-povwand/blob/master/schematic.png) for details of the mic preamp.
 
 - Strip of addressable RGB LEDs.  
 I used a [LPD8806 strip from Adafruit](https://www.adafruit.com/products/306), with its waterproof (silicone) sheath removed.  
@@ -39,5 +39,16 @@ The 5V booster is also from HobbyKing.  [This](http://www.hobbyking.com/hobbykin
 
 - LIPO cell charger.  
 I used [this one](http://www.sparkfun.com/products/10401) from Sparkfun, which is small enough to fit into the tube alongside the Teensy.  
-Alternatively, you could surface a two-pin socket connected to the LIPO cell, and use an external charger.
+Alternatively, you could surface a two-pin socket connected to the LIPO cell, and use an external charger.  But internal charger is safer & also easier to use.
+
+
+## TODO
+
+Fix the FFT; implement windowing
+
+Monitor the LIPO cell voltage directly using one of the Teensy ADCs.  Warning flash then power down on undervoltage.
+
+Build a longer-tube version suitable for rotation games.
+
+Use nunchuck or other accelerometer.  Detect rotation.  Trigger rotation-mode POV patterns.
 
