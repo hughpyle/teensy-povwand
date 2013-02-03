@@ -13,11 +13,17 @@
 
 #include <avr/pgmspace.h>
 
-#include "font_c64d.h"    // 16-pixel bitmap fonts
+// CMSIS ARM DSP functions for fast FFT
+// Note: this requires linker customization, see http://forum.pjrc.com/threads/14845-T3-linking-libarm_cortexM3l_math-a
+#define ARM_MATH_CM4
+#include <arm_math.h>
+
+// 16-pixel bitmap font definitions for POV text
+#include "font_c64d.h"
 #define FONTDATA font_c64d
 
+// SPI interface to the LED strip
 #include <FastSPI_LED.h>
-#include <fix_fft.h>      // 8-bit FFT
 
 
 // Clock frequency (Hz) for the CPU.  96M or 48M or 24MHz
@@ -33,9 +39,7 @@
 #define TICKSPERLOOP 128
 
 // Circular buffer for audio samples, and buffer for the FFT
-#define BUFSIZE 128
-// Buffer size is 2^BUFPOW2
-#define BUFPOW2 7
+#define BUFSIZE 1024
 
 // The FFT is symmetric about Nyquist, so we only care about half
 #define DATASIZE (BUFSIZE/2)
@@ -48,8 +52,6 @@
 // Number of LEDs in the strip
 #define NUM_LEDS 34
 
-// Pin for the on-board LED (only for debug - with the string of leds this pin is used for SCK)
-#define LEDPIN 13
 
 
 // Different mfr strips might have RGB in different sequences.  Mine came from Adafruit
@@ -61,7 +63,7 @@ struct CRGB *leds;
 int audioAmplitude = 0;
 float avgAudioAmplitude = 0;
 
-float audioFreqStdev = 0;
+q31_t audioFreqStdev = 0;
 float avgAudioFreqStdev = 0;
 
 // RGB colorwheels
@@ -75,12 +77,11 @@ float dB = 0.012;
 // Circular buffer to store analog samples,
 // and a copy buffer for the FFT to work in.
 static volatile uint16_t head = 0, tail = 0;
-static volatile int16_t buffer[BUFSIZE];
-static          int16_t fftbuf[BUFSIZE];  // buffer of real
-static          int16_t fftbif[BUFSIZE];  // buffer of im, nulls
-static          int32_t ledbuf[NUM_LEDS];
-static volatile uint32_t peakVal = 0;
-static volatile boolean wasPeak = false, isPeak = false;
+static volatile int16_t  buffer[BUFSIZE];             // raw values from the ADC
+static          q15_t    fftbuf[BUFSIZE*2];           // buffer of interleaved complex q15 (re|im|re|im|etc)
+static          q31_t   *fftmag = (q31_t *)fftbuf;    // buffer as q31 magnitudes
+static          int16_t  ledbuf[NUM_LEDS];
+static volatile boolean  wasPeak = false, isPeak = false;
 
 
 // -----
@@ -163,8 +164,8 @@ uint16_t fftBin( int n )
   return (n * DATASIZE) / NUM_LEDS;
 }
 
-char* text = "HAPPY NEW YEAR 2013 ";  // terminate with a space
-char* ptext = text;
+char const *text = "HAPPY NEW YEAR 2013 ";  // terminate with a space
+char const *ptext = text;
 uint16_t scanline = 0;
 uint16_t scandata = 0;
 boolean  showtext = false;
@@ -237,7 +238,7 @@ void writeLEDs()
     int m = 0;
     for( int n=fftBin(i); n<fftBin(i+1); n++ )
     {
-      a += fftbuf[n];
+      a += fftmag[n];
       m++;
     }
     n = a / m;
@@ -291,9 +292,21 @@ void readADC()
 
 // ----
 // Perform FFT of the audio samples, and other useful statistics.
+
+arm_cfft_radix4_instance_q15 S_CFFT; 
+
+void setup_fft()
+{
+  arm_status status;
+  uint32_t ifftFlag = 0; 
+  uint32_t doBitReverse = 1; 
+  status = arm_cfft_radix4_init_q15( &S_CFFT, BUFSIZE, ifftFlag, doBitReverse );
+}
+
 void doFFT()
 {
   uint16_t n;
+  uint16_t i;
   int32_t bmean;
   int16_t bmin = 32767;
   int16_t bmax = -32767;
@@ -329,40 +342,50 @@ void doFFT()
   else
     avgAudioAmplitude = ( (int32_t)19 * avgAudioAmplitude + audioAmplitude ) / 20;
   
-  // Copy into the FFT buffer (aligned to "head" so we can window correctly).
-  // Subtract the mean value from all samples, to remove DC.
-  // Then normalize to half-full-scale.
+  // Read the audio from its circular buffer (aligned to "head" so we can window correctly).
+  // Copy into the FFT buffer, subtracting the mean value from all samples, to remove DC.  Treat as Q15.
+  // TODO Apply a Hamming (raised-cosine) window.
   h = head;
+  i = 0;
   for( n=0; n<BUFSIZE; n++ )
   {
-    fftbuf[n] = ( (int32_t)( buffer[h] - bmean ) ); // * 16384 ); // / avgAudioAmplitude;
-    fftbif[n] = 0;
+    fftbuf[i] = ( buffer[h] - bmean ); // / 32768 ); // / avgAudioAmplitude; // re
+    i++;
+    fftbuf[i] = 0;    // im
+    i++;
     h++;
     if( h>=BUFSIZE ) h=0;
   }
 
-  // Window the buffer
-  fix_window(fftbuf, BUFPOW2);
-
   // FFT
-  fix_fft(fftbuf, fftbif, BUFPOW2, 0);
+  arm_cfft_radix4_q15( &S_CFFT, fftbuf );
 
-  // Convert each value to magnitude
+  // Convert each value to magnitude (in-place)
+  q15_t * pSrc = fftbuf;
+  q31_t * pDst = fftmag;
   for( n=0; n<DATASIZE; n++ )
   {
-    uint32_t i = sqrt( (uint32_t)(fftbuf[n]*fftbuf[n]) + (uint32_t)(fftbif[n]*fftbif[n]) );
-    if(i>32767) i=32767;
-    fftbuf[n] = i;
+    q15_t real, imag;
+    q31_t acc0, acc1;
+    real = *pSrc++;
+    imag = *pSrc++;
+    acc0 = __SMUAD(real, real);
+    acc1 = __SMUAD(imag, imag);
+    arm_sqrt_q31((q31_t) (((q63_t) acc0 + acc1) >> 17), pDst++);
   }
   
   // Linearize the spectrum
   // 32 16 8 4 2 1 2 4 8 16 32
   
   // Find the standard deviation of the spectrum.  High sdev <- pure tones (?)
+  // TODO use the CMSIS stdev
+  // OR just use a correct stdev, see here:
+  // http://www.johndcook.com/standard_deviation.html
+  //arm_std_q31( fftmag, DATASIZE, &audioFreqStdev );
   fmean = 0;
   for( n=0; n<DATASIZE; n++ )
   {
-    int16_t f = fftbuf[n];
+    int16_t f = fftmag[n];
     fmean += f;
     if( f > fmax ) fmax = f;
     if( f < fmin ) fmin = f;
@@ -371,16 +394,16 @@ void doFFT()
   gmean = 0;
   for( n=0; n<DATASIZE; n++ )
   {
-    int16_t g = fftbuf[n] - fmean;
+    int16_t g = fftmag[n] - fmean;
     gmean += g * g;
   }
   gmean = gmean / DATASIZE;
   audioFreqStdev = sqrt(gmean);
-
+  
   // Moving average
   avgAudioFreqStdev = ( (int32_t)9 * avgAudioFreqStdev + audioFreqStdev ) / 10;
   
-  /*
+  
   Serial.print( bmin, DEC );
   Serial.print( " " );
   Serial.print( bmax, DEC );
@@ -393,16 +416,16 @@ void doFFT()
   Serial.print( " " );
   Serial.print( audioFreqStdev, DEC );
   Serial.println( "         " );
-  */
   
+  /*
   if( digitalRead(DEBUGPIN)==HIGH )
   {
-  for( n=0; n<BUFSIZE; n++ )
-  {
-    Serial.println( buffer[n], DEC );
+    for( n=0; n<BUFSIZE; n++ )
+    {
+      Serial.println( buffer[n], DEC );
+    }
   }
-  }
-
+  */
 }
 
 
@@ -410,13 +433,9 @@ void doFFT()
 
 void setup()
 {
+  pinMode(ANALOGPIN, INPUT);
+  pinMode(DEBUGPIN, INPUT);
   Serial.begin(115200);              // baud rate is ignored with Teensy USB ACM i/o
-
-  // DEBUG
-//  pinMode(LEDPIN, OUTPUT);
-//  ledVal = 0;
-//  digitalWrite(LEDPIN, ledVal);
-  // END DEBUG
 
   FastSPI_LED.setLeds(NUM_LEDS);
   FastSPI_LED.setChipset(CFastSPI_LED::SPI_LPD8806);
@@ -424,8 +443,6 @@ void setup()
   FastSPI_LED.start();
   leds = (struct CRGB*)FastSPI_LED.getRGBData(); 
 
-  pinMode(ANALOGPIN, INPUT);
-  pinMode(DEBUGPIN, INPUT);
 
   analogReference(EXTERNAL);         // Internal reference is 1.2v, but our data goes to 3.3v
   analogReadResolution(10);          // Teensy 3.0: set ADC resolution to this many bits (more is unnecessary)
@@ -433,11 +450,17 @@ void setup()
   
   // Read once, to calibrate
   analogRead(ANALOGPIN);
-  
-  delay(5000);   // wait for slow human to get serial capture running
-  Serial.println("# hello");
 
-  setup_timer();
+  setup_fft();
+  
+  for( int i=0; i<10; i++ )
+  {
+    delay(1000);   // wait for slow human to get serial capture running
+    Serial.print("# hello");
+    Serial.println( i, DEC );
+  }
+
+  setup_timer(); 
 }
 
 
@@ -446,9 +469,6 @@ void loop()
 {
   if( !doMainLoop ) return;
   doMainLoop = false;
-  
-  // DEBUG
-// digitalWrite(LEDPIN, ledVal ^= 1);
 
   doFFT();
 }

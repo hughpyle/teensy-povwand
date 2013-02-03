@@ -44,7 +44,8 @@ Alternatively, you could surface a two-pin socket connected to the LIPO cell, an
 
 ## TODO
 
-Fix the FFT; implement windowing
+Fix the FFT; implement windowing.  
+Instead of the fix_fft code, use the CMSIS optimized libraries compiled for the M4 processor.  Wicked awesome.
 
 Monitor the LIPO cell voltage directly using one of the Teensy ADCs.  Warning flash then power down on undervoltage.
 
